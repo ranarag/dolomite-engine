@@ -25,25 +25,19 @@ if is_fla_available():
     from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_linear_attn_delta_rule
 
 
-def simple_norm(x):
-    return (F.normalize(x, dim=-1) * x.shape[-1] ** 0.5).to(x)
+@torch.compile
+def simple_norm(x: torch.Tensor) -> torch.Tensor:
+    return F.normalize(x, dim=-1) * x.shape[-1] ** 0.5
 
 
-# @torch.jit.script
-def elu_p1(x):
-    return (F.elu(x, 1.0, False) + 1.0).to(x)
+@torch.compile
+def elu_p1(x: torch.Tensor) -> torch.Tensor:
+    return F.elu(x) + 1
 
 
-# @torch.jit.script
-def sum_norm(x):
-    return (x / x.sum(-1, keepdim=True)).to(x)
-
-
-# @torch.jit.script
-def elu_norm(x):
-    dtype = x.dtype
-    x = F.elu(x, 1.0, False) + 1.0
-    return (x / x.sum(-1, keepdim=True)).to(dtype)
+@torch.compile
+def sum_norm(x: torch.Tensor) -> torch.Tensor:
+    return x / x.sum(-1, keepdim=True)
 
 
 if is_fla_available():
