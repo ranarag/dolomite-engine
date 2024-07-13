@@ -116,9 +116,7 @@ class DeltaNet(nn.Module):
         init_method = InitMethod(config.init_method)
         if init_method == InitMethod.mup:
             std_in /= math.sqrt(config.m_width)
-        self.q_proj = ParameterizedLinear(self.hidden_size, self.key_dim, bias=False, std=std_in)
-        self.k_proj = ParameterizedLinear(self.hidden_size, self.key_dim, bias=False, std=std_in)
-        self.v_proj = ParameterizedLinear(self.hidden_size, self.value_dim, bias=False, std=std_in)
+        self.c_proj = ParameterizedLinear(self.hidden_size, 2 * self.key_dim + self.value_dim, bias=False, std=std_in)
 
         if use_short_conv:
             std_conv = initializer_range
@@ -181,26 +179,23 @@ class DeltaNet(nn.Module):
             if self.share_conv_kernel:
                 # conv state is updated inplace
                 hidden_states = self.h_conv1d(hidden_states, attention_mask, conv_state)
-
-                q = self.q_proj(hidden_states)
-                k = self.k_proj(hidden_states)
-                v = self.v_proj(hidden_states)
+                qkv = self.c_proj(hidden_states)
+                q, k, v = qkv.split((self.key_dim, self.key_dim, self.value_dim), dim=-1)
             else:
+                qkv = self.c_proj(hidden_states)
+                q, k, v = qkv.split((self.key_dim, self.key_dim, self.value_dim), dim=-1)
+
                 conv_state_q = last_state[0] if use_cache else None
                 conv_state_k = last_state[1] if use_cache else None
                 conv_state_v = last_state[2] if use_cache else None
-
-                q = self.q_proj(hidden_states)
-                k = self.k_proj(hidden_states)
-                v = self.v_proj(hidden_states)
 
                 q = self.q_conv1d(q, attention_mask, conv_state_q)
                 k = self.k_conv1d(k, attention_mask, conv_state_k)
                 v = self.v_conv1d(v, attention_mask, conv_state_v)
         else:
-            q = self.q_proj(hidden_states)
-            k = self.k_proj(hidden_states)
-            v = self.silu(self.v_proj(hidden_states))
+            qkv = self.c_proj(hidden_states)
+            q, k, v = qkv.split((self.key_dim, self.key_dim, self.value_dim), dim=-1)
+            v = self.silu(v)
 
         # dealing with left-padding
         if attention_mask is not None:
@@ -220,28 +215,32 @@ class DeltaNet(nn.Module):
 
         if self.qk_norm is not None:
             if self.qk_norm == "l2":
-                k = nn.functional.normalize(k, dim=-1, p=2).to(v)  # auto mixed precision type transfer is annoying.
-                q = nn.functional.normalize(q, dim=-1, p=2).to(v)
+                k = nn.functional.normalize(k, dim=-1, p=2)
+                q = nn.functional.normalize(q, dim=-1, p=2)
             elif self.qk_norm == "sum":
-                q = sum_norm(q).to(v)
-                k = sum_norm(k).to(v)
+                q = sum_norm(q)
+                k = sum_norm(k)
 
         if self.use_beta:
             beta = rearrange(self.b_proj(hidden_states), "b l h -> b h l").sigmoid()
         else:
             beta = q.new_ones(q.shape[0], q.shape[1], q.shape[2])
+
         state = past_key_values[self.layer_idx][-1] if use_cache else None
+
         if mode == "fused_recurrent":
             o, recurrent_state = fused_recurrent_linear_attn_delta_rule(
                 q, k, v, beta, state, output_final_state=use_cache
             )
         elif mode == "fused_chunk":
             assert self.chunk_size in [16, 32, 64]
+
             o, recurrent_state = fused_chunk_delta_rule(
                 q, k, v, beta, self.chunk_size, state, output_final_state=use_cache
             )
         elif mode == "chunk":
             assert self.chunk_size in [16, 32, 64]
+
             o, recurrent_state = chunk_delta_rule(q, k, v, beta, self.chunk_size, state, output_final_state=use_cache)
         else:
             raise NotImplementedError(f"Not supported mode `{mode}`.")
@@ -254,6 +253,7 @@ class DeltaNet(nn.Module):
                     state = (conv_state_q, conv_state_k, conv_state_v, recurrent_state)
             else:
                 state = (recurrent_state,)
+
             state = (recurrent_state,)
             past_key_values.update(state, self.layer_idx)
 
