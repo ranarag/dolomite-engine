@@ -205,9 +205,11 @@ class DeltaNet(nn.Module):
 
         if self.qk_activation != "silu":
             if self.qk_activation == "relu":
-                q, k = q.relu(), k.relu()
+                q = F.relu(q)
+                k = F.relu(k)
             elif self.qk_activation == "elu":
-                q, k = elu_p1(q), elu_p1(k)
+                q = elu_p1(q)
+                k = elu_p1(k)
             elif self.qk_activation == "identity":
                 pass
             else:
@@ -215,8 +217,8 @@ class DeltaNet(nn.Module):
 
         if self.qk_norm is not None:
             if self.qk_norm == "l2":
-                k = nn.functional.normalize(k, dim=-1, p=2)
-                q = nn.functional.normalize(q, dim=-1, p=2)
+                k = F.normalize(k, dim=-1, p=2)
+                q = F.normalize(q, dim=-1, p=2)
             elif self.qk_norm == "sum":
                 q = sum_norm(q)
                 k = sum_norm(k)
@@ -257,9 +259,8 @@ class DeltaNet(nn.Module):
             state = (recurrent_state,)
             past_key_values.update(state, self.layer_idx)
 
-        o = rearrange(o, "b h l d -> b l h d")
         o = self.o_norm(o)
-        o = rearrange(o, "b l h d -> b l (h d)")
+        o = rearrange(o, "b h l d -> b l (h d)")
         o = self.o_proj(o)
 
         return o
