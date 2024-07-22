@@ -1,5 +1,3 @@
-from typing import List, Optional, Tuple, Union
-
 import torch
 import torch.nn.functional as F
 from transformers import DynamicCache
@@ -23,6 +21,7 @@ class GPTDolomiteForCausalLM(GPTDolomitePreTrainedModel):
             )
 
         self.m_width = config.m_width
+        self.upcast_logits_for_loss = config.upcast_logits_for_loss
 
         # Initialize weights and apply final processing
         self.post_init()
@@ -41,12 +40,11 @@ class GPTDolomiteForCausalLM(GPTDolomitePreTrainedModel):
         if not self._tied_word_embeddings:
             self.lm_head = new_embeddings
 
-    # FIXME typing
     def prepare_inputs_for_generation(
         self,
         input_ids: torch.Tensor,
-        past_key_values: Optional[DynamicCache] = None,
-        inputs_embeds: Optional[torch.Tensor] = None,
+        past_key_values: DynamicCache | None = None,
+        inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> dict:
         token_type_ids = kwargs.get("token_type_ids", None)
@@ -96,20 +94,20 @@ class GPTDolomiteForCausalLM(GPTDolomitePreTrainedModel):
 
     def forward(
         self,
-        input_ids: Union[torch.Tensor, List[List[int]]] = None,
-        past_key_values: DynamicCache = None,
-        attention_mask: torch.Tensor = None,
-        token_type_ids: Union[torch.Tensor, List[List[int]]] = None,
-        position_ids: Union[torch.Tensor, List[List[int]]] = None,
-        inputs_embeds: Union[torch.Tensor, List[List[float]]] = None,
-        labels: Union[torch.Tensor, List[List[int]]] = None,
-        use_cache: bool = None,
-        output_attentions: bool = None,
-        output_hidden_states: bool = None,
-        return_dict: bool = None,
-        cu_seqlens: torch.Tensor = None,
-        max_seqlen: torch.Tensor = None,
-    ) -> Union[Tuple, CausalLMOutputWithPast]:
+        input_ids: torch.Tensor | list[list[int]] | None = None,
+        past_key_values: DynamicCache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | list[list[int]] | None = None,
+        position_ids: torch.Tensor | list[list[int]] | None = None,
+        inputs_embeds: torch.Tensor | list[list[float]] | None = None,
+        labels: torch.Tensor | list[list[int]] | None = None,
+        use_cache: bool | None = None,
+        output_attentions: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> tuple | CausalLMOutputWithPast:
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         input_ids, position_ids, token_type_ids, labels, cu_seqlens, max_seqlen = self.prepare_inputs_for_model(
@@ -152,11 +150,7 @@ class GPTDolomiteForCausalLM(GPTDolomitePreTrainedModel):
         )
         hidden_states = transformer_outputs[0]
 
-        lm_logits = (
-            F.linear(hidden_states, self.transformer.wte.weight)
-            if self._tied_word_embeddings
-            else self.lm_head(hidden_states)
-        )
+        lm_logits = self.get_lm_logits(hidden_states)
 
         if self.m_width is not None:
             lm_logits = lm_logits / self.m_width
@@ -174,3 +168,35 @@ class GPTDolomiteForCausalLM(GPTDolomitePreTrainedModel):
             hidden_states=transformer_outputs.hidden_states,
             attentions=transformer_outputs.attentions,
         )
+
+    def get_lm_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return (
+            F.linear(hidden_states, self.transformer.wte.weight)
+            if self._tied_word_embeddings
+            else self.lm_head(hidden_states)
+        )
+
+    def get_autoregressive_language_modeling_loss(
+        self, lm_logits: torch.Tensor, labels: torch.Tensor | None, cu_seqlens: torch.Tensor
+    ) -> torch.Tensor:
+        if labels is None:
+            return None
+
+        if self._use_padding_free_transformer:
+            shift_logits = lm_logits[:-1, :]
+            shift_labels = labels[1:].to(shift_logits.device)
+
+            # this is needed so that the last token of current example doesn't predict first token of next example
+            drop_loss_positions = cu_seqlens[1:-1] - 1
+            shift_labels[drop_loss_positions] = -100
+        else:
+            # Shift so that tokens < n predict n
+            shift_logits = lm_logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous().to(shift_logits.device)
+
+        if self.upcast_logits_for_loss:
+            shift_logits = shift_logits.float()
+
+        loss = F.cross_entropy(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+
+        return loss

@@ -1,5 +1,4 @@
 import logging
-from typing import List, Tuple
 
 import torch
 import torch.distributed
@@ -7,7 +6,7 @@ from transformers import AutoTokenizer
 
 from ...arguments import TrainingArgs
 from ...defaults import INPUT_FORMAT, OUTPUT_FORMAT
-from ...utils import get_global_rank, get_world_size, log_rank_0
+from ...utils import ProcessGroupManager, log_rank_0
 from ..dataloader import DispatchingDataLoader, ResumableDataLoader, get_source_and_broadcast_group
 from .blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from .blended_megatron_dataset_config import GPTDatasetConfig
@@ -36,9 +35,13 @@ def get_megatron_gpt_dataloaders(args: TrainingArgs, tokenizer: AutoTokenizer, c
     dispatching_dataloader = args.distributed_args.dispatching_dataloader
 
     if dispatching_dataloader:
+        assert (
+            ProcessGroupManager.get_tensor_parallel_world_size() == 1
+        ), "tensor parallel doesn't support dispatching dataloader"
+
         num_ranks_per_node = torch.cuda.device_count()
-        node_rank = get_global_rank() // num_ranks_per_node
-        num_nodes = get_world_size() // num_ranks_per_node
+        node_rank = ProcessGroupManager.get_global_rank() // num_ranks_per_node
+        num_nodes = ProcessGroupManager.get_world_size() // num_ranks_per_node
 
         def _get_source_broadcast_mapping() -> dict:
             result = {}
@@ -50,9 +53,13 @@ def get_megatron_gpt_dataloaders(args: TrainingArgs, tokenizer: AutoTokenizer, c
 
         source_broadcast_mapping = _get_source_broadcast_mapping()
 
-        is_built_on_rank = get_global_rank() == node_rank * num_ranks_per_node
+        # only build dataloader on first rank of each node
+        is_built_on_rank = ProcessGroupManager.get_global_rank() == node_rank * num_ranks_per_node
     else:
-        is_built_on_rank = True
+        # only build dataloader on first rank of each TP group
+        is_built_on_rank = (
+            ProcessGroupManager.get_global_rank() == ProcessGroupManager.get_tensor_parallel_first_rank()
+        )
 
     gpt_dataset_builder = BlendedMegatronDatasetBuilder(
         GPTDataset,
@@ -102,7 +109,7 @@ def get_megatron_gpt_dataloaders(args: TrainingArgs, tokenizer: AutoTokenizer, c
     # Option 4: data loading using --(train|val|test)-weighted-split-paths
     elif train_weighted_split_paths:
 
-        def _parse_and_get_dataset(weighted_split_paths: List[dict], dataset_split: Split) -> List[GPTDataset]:
+        def _parse_and_get_dataset(weighted_split_paths: list[dict], dataset_split: Split) -> list[GPTDataset]:
             if weighted_split_paths is None:
                 return []
 
@@ -142,7 +149,7 @@ def get_megatron_gpt_dataloaders(args: TrainingArgs, tokenizer: AutoTokenizer, c
 
     log_rank_0(logging.INFO, "> finished creating GPT datasets ...")
 
-    def _get_dataloader(dataset: GPTDataset, consumed_samples: int):
+    def _get_dataloader(dataset: GPTDataset | None, consumed_samples: int):
         # we use batch sampler here to match the data order of NVIDIA's megatron repo
         if dispatching_dataloader:
             is_dataset_none_on_source_rank = [dataset is None if is_built_on_rank else False]
@@ -188,8 +195,8 @@ def get_megatron_gpt_dataloaders(args: TrainingArgs, tokenizer: AutoTokenizer, c
                 total_samples=len(dataset),
                 consumed_samples=consumed_samples,
                 micro_batch_size=micro_batch_size,
-                num_replicas=get_world_size(),
-                rank=get_global_rank(),
+                num_replicas=ProcessGroupManager.get_data_parallel_world_size(),
+                rank=ProcessGroupManager.get_data_parallel_rank(),
             )
 
             dataloader = ResumableDataLoader(
@@ -211,15 +218,17 @@ def _get_train_val_test_samples(
     gradient_accumulation_steps: int,
     eval_interval: int,
     eval_steps: int,
-) -> Tuple[int]:
-    train_samples = num_training_steps * micro_batch_size * gradient_accumulation_steps * get_world_size()
+) -> tuple[int]:
+    dp_world_size = ProcessGroupManager.get_data_parallel_world_size()
+
+    train_samples = num_training_steps * micro_batch_size * gradient_accumulation_steps * dp_world_size
     val_samples = (
         (num_training_steps // eval_interval + 1)
         * eval_steps
         * micro_batch_size
         * gradient_accumulation_steps
-        * get_world_size()
+        * dp_world_size
     )
-    test_samples = eval_steps * micro_batch_size * gradient_accumulation_steps * get_world_size()
+    test_samples = eval_steps * micro_batch_size * gradient_accumulation_steps * dp_world_size
 
     return train_samples, val_samples, test_samples

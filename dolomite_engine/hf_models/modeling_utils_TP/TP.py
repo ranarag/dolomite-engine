@@ -1,166 +1,27 @@
-from typing import Tuple
-
 import torch
 import torch.distributed
+import torch.nn as nn
+from torch.distributed._tensor.api import DTensor
+from torch.distributed._tensor.placement_types import Placement
 
-from ...utils import ProcessGroupManager, SafeTensorsWeightsManager
-from ..modeling_utils import ParameterizedLinear
-from .random import CUDA_RNGStatesTracker
-
-
-_TENSOR_PARALLEL_GROUP_MANAGER: ProcessGroupManager = None
-_RNG_TRACKER: CUDA_RNGStatesTracker = None
+from ...utils import ProcessGroupManager
+from ..utils import divide_if_divisible
 
 
-def get_cuda_rng_tracker() -> CUDA_RNGStatesTracker:
-    return _RNG_TRACKER
-
-
-def set_cuda_rng_tracker(tracker: CUDA_RNGStatesTracker) -> None:
-    global _RNG_TRACKER
-    _RNG_TRACKER = tracker
-
-
-def get_tensor_parallel_group_manager() -> ProcessGroupManager:
-    return _TENSOR_PARALLEL_GROUP_MANAGER
-
-
-def set_tensor_parallel_group_manager(process_group_manager: ProcessGroupManager) -> None:
-    global _TENSOR_PARALLEL_GROUP_MANAGER
-    _TENSOR_PARALLEL_GROUP_MANAGER = process_group_manager
-
-
-def _reduce(input: torch.Tensor) -> torch.Tensor:
-    """All-reduce the input tensor across model parallel group."""
-
-    # Bypass the function if we are using only 1 GPU.
-    if get_tensor_parallel_group_manager().get_world_size() == 1:
-        return input
-
-    # All-reduce.
-    torch.distributed.all_reduce(input, group=get_tensor_parallel_group_manager().get_process_group())
-
-    return input
-
-
-class _CopyToTensorParallelRegion(torch.autograd.Function):
-    """Pass the input to the model parallel region."""
-
-    @staticmethod
-    def forward(ctx, input: torch.Tensor) -> torch.Tensor:
-        return input
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
-        return _reduce(grad_output)
-
-
-class _ReduceFromTensorParallelRegion(torch.autograd.Function):
-    """All-reduce the input from the model parallel region."""
-
-    @staticmethod
-    def forward(ctx, input: torch.Tensor) -> torch.Tensor:
-        return _reduce(input)
-
-    @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> torch.Tensor:
-        return grad_output
-
-
-def copy_to_tensor_parallel_region(input: torch.Tensor) -> torch.Tensor:
-    return _CopyToTensorParallelRegion.apply(input)
-
-
-def reduce_from_tensor_parallel_region(input: torch.Tensor) -> torch.Tensor:
-    return _ReduceFromTensorParallelRegion.apply(input)
-
-
-class ColumnParallelLinear(ParameterizedLinear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
-        self.tp_world_size = get_tensor_parallel_group_manager().get_world_size()
-
-        assert (
-            out_features % self.tp_world_size == 0
-        ), f"`out_features` ({out_features}) must be divisible by `tensor_parallel_world_size` ({self.tp_world_size})"
-
-        self.out_features_per_device = out_features // self.tp_world_size
-        super().__init__(in_features, self.out_features_per_device, bias)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = copy_to_tensor_parallel_region(input)
-        return super().forward(input)
-
-    def load_unsharded_weights(self, safetensors_weight_manager: SafeTensorsWeightsManager, prefix: str = "") -> None:
-        weight = safetensors_weight_manager.get_slice(prefix + "weight")
-        weight = tensor_parallel_split_safetensor_slice(weight, dim=0)
-        state_dict = {"weight": weight}
-
-        if self.bias is not None:
-            bias = safetensors_weight_manager.get_slice(prefix + "bias")
-            bias = tensor_parallel_split_safetensor_slice(bias, dim=0)
-            state_dict["bias"] = bias
-
-        self.load_state_dict(state_dict)
-
-    def extra_repr(self) -> str:
-        return "in_features={}, out_features_per_device={}, bias={}".format(
-            self.in_features, self.out_features_per_device, self.bias is not None
-        )
-
-
-class RowParallelLinear(ParameterizedLinear):
-    def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
-        self.tp_world_size = get_tensor_parallel_group_manager().get_world_size()
-        self.is_tp_first_rank = get_tensor_parallel_group_manager().get_first_rank() == torch.distributed.get_rank()
-
-        assert (
-            in_features % self.tp_world_size == 0
-        ), f"`in_features` ({in_features}) must be divisible by `tensor_parallel_world_size` ({self.tp_world_size})"
-
-        self.in_features_per_device = in_features // self.tp_world_size
-        self.out_features = out_features
-        self.tp_bias = bias
-
-        super().__init__(self.in_features_per_device, out_features, bias=bias if self.is_tp_first_rank else False)
-
-    def forward(self, input: torch.Tensor) -> torch.Tensor:
-        input = super().forward(input)
-        return reduce_from_tensor_parallel_region(input)
-
-    def load_unsharded_weights(self, safetensors_weight_manager: SafeTensorsWeightsManager, prefix: str = "") -> None:
-        weight = safetensors_weight_manager.get_slice(prefix + "weight")
-        weight = tensor_parallel_split_safetensor_slice(weight, dim=1)
-        state_dict = {"weight": weight}
-
-        if self.bias is not None:
-            assert (
-                self.is_tp_first_rank
-            ), "bias parameter found on rank that is not the first rank for the process group"
-
-            bias = safetensors_weight_manager.get_tensor(prefix + "bias")
-            state_dict["bias"] = bias
-
-        self.load_state_dict(state_dict)
-
-    def extra_repr(self) -> str:
-        return "in_features_per_device={}, out_features={}, bias={}".format(
-            self.in_features_per_device, self.out_features, self.tp_bias
-        )
-
-
-def tensor_parallel_split_safetensor_slice(slice, dim: int, start_end: Tuple[int, int] = None) -> torch.Tensor:
+def tensor_parallel_split_safetensor_slice(slice, dim: int, start_end: tuple[int, int] | None = None) -> torch.Tensor:
     shape = slice.get_shape()
     dimensionality = len(shape)
-    assert 1 <= dimensionality <= 2, f"tensor should be either 1 or 2 dimensional but {dimensionality} was found"
+    assert dimensionality in [1, 2], f"tensor should be either 1 or 2 dimensional but {dimensionality} was found"
 
-    tp_rank = get_tensor_parallel_group_manager().get_rank()
-    tp_world_size = get_tensor_parallel_group_manager().get_world_size()
+    tp_rank = ProcessGroupManager.get_tensor_parallel_rank()
+    tp_world_size = ProcessGroupManager.get_tensor_parallel_world_size()
 
     if start_end is None:
-        assert (
-            shape[dim] % tp_world_size == 0
-        ), f"split dimension ({dim}) is not divisible by tensor parallel world size ({tp_world_size})"
-        stride = shape[dim] // tp_world_size
+        stride = divide_if_divisible(
+            shape[dim],
+            tp_world_size,
+            f"split dimension ({dim}) is not divisible by tensor parallel world size ({tp_world_size})",
+        )
         start_index = tp_rank * stride
         end_index = (tp_rank + 1) * stride
     else:
@@ -180,3 +41,38 @@ def tensor_parallel_split_safetensor_slice(slice, dim: int, start_end: Tuple[int
             return slice[:, start_index:end_index]
     else:
         raise RuntimeError("this code should not be reachable")
+
+
+def tensor_to_dtensor(
+    tensor: torch.Tensor, current_placement: Placement, desired_placement: Placement | None = None
+) -> DTensor:
+    tp_mesh = ProcessGroupManager.get_tensor_parallel_mesh()
+
+    dtensor = DTensor.from_local(tensor, device_mesh=tp_mesh, run_check=False, placements=[current_placement])
+    if desired_placement is not None:
+        dtensor = dtensor.redistribute(device_mesh=tp_mesh, placements=[desired_placement])
+
+    return dtensor
+
+
+def dtensor_to_tensor(
+    dtensor: DTensor, desired_placement: Placement | None = None, grad_placement: Placement | None = None
+) -> torch.Tensor:
+    if desired_placement is not None:
+        dtensor = dtensor.redistribute(
+            device_mesh=ProcessGroupManager.get_tensor_parallel_mesh(), placements=[desired_placement]
+        )
+
+    tensor = dtensor.to_local(grad_placements=None if grad_placement is None else [grad_placement])
+
+    return tensor
+
+
+@torch.no_grad()
+def modify_state_dict_to_dtensor_dict(module: nn.Module, state_dict: dict) -> dict:
+    result = {}
+    for key, tensor in state_dict.items():
+        device_mesh = getattr(module, key).device_mesh
+        placements = getattr(module, key).placements
+        result[key] = DTensor.from_local(tensor, device_mesh=device_mesh, placements=placements)
+    return result

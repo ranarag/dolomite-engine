@@ -1,38 +1,21 @@
-from ...enums import AttentionHeadType, PositionEmbeddingType
+from ...config import CommonConfig
 from ...modeling_utils import FlashAttention2
-from .base import Attention_TP
+from .base import _BaseAttention_TP
 
 
-class FlashAttention2_TP(Attention_TP, FlashAttention2):
+class FlashAttention2_TP(_BaseAttention_TP, FlashAttention2):
     def __init__(
         self,
-        hidden_size: int,
-        num_attention_heads: int,
-        num_key_value_heads: int,
-        attention_head_type: AttentionHeadType,
-        position_embedding_type: PositionEmbeddingType,
+        config: CommonConfig,
         causal: bool,
-        add_bias: bool,
-        scale_attention_weights: bool,
-        attention_softmax_in_fp32: bool,
-        scale_attention_softmax_in_fp32: bool,
-        attn_pdrop: float,
-        resid_pdrop: float,
-        layer_idx: int = None,
+        layer_idx: int | None = None,
+        sequence_parallel: bool = False,
     ) -> None:
-        Attention_TP.__init__(
+        _BaseAttention_TP.__init__(
             self,
-            hidden_size,
-            num_attention_heads,
-            num_key_value_heads,
-            attention_head_type,
-            position_embedding_type,
-            causal,
-            add_bias,
-            scale_attention_weights,
-            attention_softmax_in_fp32,
-            scale_attention_softmax_in_fp32,
-            attn_pdrop,
-            resid_pdrop,
-            layer_idx,
+            config=config,
+            causal=causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=False,
+            sequence_parallel=sequence_parallel,
         )

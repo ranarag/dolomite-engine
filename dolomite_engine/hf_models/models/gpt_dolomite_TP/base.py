@@ -1,44 +1,48 @@
-from typing import Union
-
 import torch
 import torch.nn as nn
 from tqdm import tqdm
 
-from ....utils import SafeTensorsWeightsManager
+from ....utils import ProcessGroupManager, SafeTensorsWeightsManager
 from ...enums import AttentionHeadType, PositionEmbeddingType
-from ...modeling_utils import ParameterizedEmbedding, RoPE, YaRNScaledRoPE, get_normalization_function
-from ...modeling_utils_TP import Alibi_TP, Dropout_TP, Embedding_TP, get_tensor_parallel_group_manager
+from ...modeling_utils import RoPE, YaRNScaledRoPE
+from ...modeling_utils_TP import Alibi_TP, Dropout_TP, Embedding_TP, get_normalization_function_TP
 from ..gpt_dolomite import GPTDolomiteConfig, GPTDolomiteModel, GPTDolomitePreTrainedModel
 from .layer import GPTDolomiteBlock_TP
 
 
-class GPTDolomiteModel_TP(GPTDolomiteModel):
-    def __init__(
-        self,
-        config: GPTDolomiteConfig,
-        tensor_parallel_vocab_matrix: bool = False,
-        tensor_parallel_position_embedding_matrix: bool = False,
-        **kwargs,
-    ) -> None:
-        GPTDolomitePreTrainedModel.__init__(self, config, **kwargs)
+class GPTDolomitePreTrainedModel_TP(GPTDolomitePreTrainedModel):
+    _no_split_modules = ["GPTDolomiteBlock_TP"]
 
-        self.tensor_parallel_vocab_matrix = tensor_parallel_vocab_matrix
-        self.tensor_parallel_position_embedding_matrix = tensor_parallel_position_embedding_matrix
+    def __init__(self, config: GPTDolomiteConfig, *inputs, **kwargs):
+        GPTDolomitePreTrainedModel.__init__(self, config, *inputs, **kwargs)
+
+        self.tensor_parallel_word_embeddings = kwargs.get("tensor_parallel_word_embeddings", False)
+        self.sequence_parallel = kwargs.get("sequence_parallel", False)
+
+
+class GPTDolomiteModel_TP(GPTDolomitePreTrainedModel_TP, GPTDolomiteModel):
+    def __init__(self, config: GPTDolomiteConfig, **kwargs) -> None:
+        GPTDolomitePreTrainedModel_TP.__init__(self, config, **kwargs)
 
         self.attention_head_type = AttentionHeadType(config.attention_head_type)
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
         self.max_position_embeddings = config.max_position_embeddings
+        self.m_emb = config.m_emb
+        self.initializer_range = config.initializer_range
         self.head_dim = self.embed_dim // self.num_heads
 
-        self.tp_world_size = get_tensor_parallel_group_manager().get_world_size()
+        self.tp_world_size = ProcessGroupManager.get_tensor_parallel_world_size()
+        self.wte = Embedding_TP(
+            config.vocab_size,
+            self.embed_dim,
+            std=self.initializer_range,
+            tensor_parallel_word_embeddings=self.tensor_parallel_word_embeddings,
+            use_padding_free_transformer=self._use_padding_free_transformer,
+            sequence_parallel=self.sequence_parallel,
+        )
 
-        if self.tensor_parallel_vocab_matrix:
-            self.wte = Embedding_TP(config.vocab_size, self.embed_dim)
-        else:
-            self.wte = ParameterizedEmbedding(config.vocab_size, self.embed_dim)
-
-        self.drop = Dropout_TP(config.embd_pdrop)
+        self.drop = nn.Identity() if config.embd_pdrop == 0 else Dropout_TP(config.embd_pdrop)
         self.h = nn.ModuleList(
             [
                 GPTDolomiteBlock_TP(
@@ -47,15 +51,18 @@ class GPTDolomiteModel_TP(GPTDolomiteModel):
                     self.attention_implementation,
                     self._use_padding_free_transformer,
                     layer_idx=i,
+                    sequence_parallel=self.sequence_parallel,
                 )
                 for i in range(config.num_hidden_layers)
             ]
         )
-        self.ln_f = get_normalization_function(
+        self.ln_f = get_normalization_function_TP(
             config.normalization_function,
             self.embed_dim,
             eps=config.layer_norm_epsilon,
             normalization_implementation=self.normalization_implementation,
+            use_padding_free_transformer=self._use_padding_free_transformer,
+            sequence_parallel=self.sequence_parallel,
         )
 
         self.position_embedding_type = PositionEmbeddingType(config.position_embedding_type)
@@ -64,96 +71,52 @@ class GPTDolomiteModel_TP(GPTDolomiteModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def get_input_embeddings(self) -> Union[Embedding_TP, ParameterizedEmbedding]:
+    def get_input_embeddings(self) -> Embedding_TP:
         return self.wte
 
-    def set_input_embeddings(self, new_embeddings: Union[Embedding_TP, ParameterizedEmbedding]) -> None:
+    def set_input_embeddings(self, new_embeddings: Embedding_TP) -> None:
         self.wte = new_embeddings
 
-    def load_unsharded_weights(self, safetensors_weight_manager: SafeTensorsWeightsManager, prefix: str = "") -> None:
-        self._load_embeddings(self.wte, safetensors_weight_manager, prefix + "wte.")
-        if self.position_embedding_type == PositionEmbeddingType.learned_absolute:
-            self._load_embeddings(self.wpe, safetensors_weight_manager, prefix + "wpe.")
-
-        for layer_idx, block in tqdm(enumerate(self.h), desc="Loading layers"):
-            block.load_unsharded_weights(safetensors_weight_manager, prefix + f"h.{layer_idx}.")
-
-        state_dict = {
-            "weight": safetensors_weight_manager.get_tensor(prefix + "ln_f.weight"),
-            "bias": safetensors_weight_manager.get_tensor(prefix + "ln_f.bias"),
-        }
-        self.ln_f.load_state_dict(state_dict)
-
-    def _load_embeddings(
-        self,
-        module: Union[Embedding_TP, ParameterizedEmbedding],
-        safetensors_weight_manager: SafeTensorsWeightsManager,
-        prefix: str,
+    def load_from_safetensors_weights_manager(
+        self, safetensors_weight_manager: SafeTensorsWeightsManager, prefix: str = ""
     ) -> None:
-        if isinstance(module, Embedding_TP):
-            module.load_unsharded_weights(safetensors_weight_manager, prefix)
+        # word embeddings
+        self.wte.load_from_safetensors_weights_manager(safetensors_weight_manager, prefix + "wte.")
+
+        # positional embeddings
+        if self.position_embedding_type == PositionEmbeddingType.learned_absolute:
+            self.wpe.load_from_safetensors_weights_manager(safetensors_weight_manager, prefix + "wpe.")
+        elif self.position_embedding_type == PositionEmbeddingType.alibi:
+            with torch.device(torch.cuda.current_device()):
+                self.alibi.reset_parameters()
+        elif self.position_embedding_type == PositionEmbeddingType.rope:
+            with torch.device(torch.cuda.current_device()):
+                self.rope.reset_parameters()
         else:
-            state_dict = {"weight": safetensors_weight_manager.get_tensor(prefix + "weight")}
-            module.load_state_dict(state_dict)
+            raise ValueError(f"unexpected position_embedding_type ({self.position_embedding_type})")
 
-    def _get_alibi_bias(
-        self,
-        attention_mask: torch.Tensor,
-        batch_size: int,
-        query_length: int,
-        key_length: int,
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> torch.Tensor:
-        if self.position_embedding_type != PositionEmbeddingType.alibi:
-            return None
+        # layers
+        for layer_idx, block in tqdm(enumerate(self.h), desc="Loading layers"):
+            block.load_from_safetensors_weights_manager(safetensors_weight_manager, prefix + f"h.{layer_idx}.")
 
-        alibi_bias = self.alibi(attention_mask, batch_size, key_length, device, dtype)
-
-        # ==========================================================================================
-        # alibi_bias -> (batch_size, num_heads, key_length)
-        # ==========================================================================================
-
-        if self._use_eager_attention:
-            if self.attention_head_type == AttentionHeadType.mqa:
-                if query_length != 1:
-                    alibi_bias = alibi_bias.repeat(1, query_length, 1)
-            elif self.attention_head_type in [AttentionHeadType.mha, AttentionHeadType.gqa]:
-                alibi_bias = alibi_bias.unsqueeze(2)
-                if query_length != 1:
-                    alibi_bias = alibi_bias.expand(-1, -1, query_length, -1)
-                alibi_bias = alibi_bias.view(
-                    batch_size * (self.num_heads // self.tp_world_size), query_length, key_length
-                )
-            else:
-                raise NotImplementedError()
-        elif self._use_sdpa:
-            alibi_bias = alibi_bias.unsqueeze(2)
-            if query_length != 1:
-                alibi_bias = alibi_bias.expand(-1, -1, query_length, -1)
-        elif self._use_flash_attention_2:
-            raise ValueError()
-
-        # ==========================================================================================
-        # eager:
-        #     AttentionHeadType.mqa:
-        #         alibi_bias -> (batch_size, query_length * num_heads, key_length)
-        #     AttentionHeadType.mha:
-        #         alibi_bias -> (batch_size * num_heads, query_length, key_length)
-        # sdpa:
-        #     alibi_bias -> (batch_size, num_heads, query_length, key_length)
-        # ==========================================================================================
-
-        return alibi_bias
+        # final layernorm
+        state_dict = {"weight": safetensors_weight_manager.get_tensor(prefix + "ln_f.weight")}
+        if hasattr(self.ln_f, "bias"):
+            state_dict["bias"] = safetensors_weight_manager.get_tensor(prefix + "ln_f.bias")
+        self.ln_f.load_state_dict(state_dict)
 
     def _setup_positional_encoding(self) -> None:
         max_position_embeddings = self.config.max_position_embeddings
 
         if self.position_embedding_type == PositionEmbeddingType.learned_absolute:
-            if self.tensor_parallel_position_embedding_matrix:
-                self.wpe = Embedding_TP(max_position_embeddings, self.embed_dim)
-            else:
-                self.wpe = ParameterizedEmbedding(max_position_embeddings, self.embed_dim)
+            self.wpe = Embedding_TP(
+                max_position_embeddings,
+                self.embed_dim,
+                std=self.initializer_range,
+                tensor_parallel_word_embeddings=False,
+                use_padding_free_transformer=self._use_padding_free_transformer,
+                sequence_parallel=self.sequence_parallel,
+            )
         elif self.position_embedding_type == PositionEmbeddingType.alibi:
             self.alibi = Alibi_TP(self.num_heads)
         elif self.position_embedding_type == PositionEmbeddingType.rope:

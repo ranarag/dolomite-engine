@@ -1,5 +1,4 @@
 import math
-from typing import Tuple
 
 import torch
 import torch.nn as nn
@@ -8,13 +7,14 @@ from transformers import DynamicCache
 
 from ...config import CommonConfig
 from ...enums import AttentionHeadType, InitMethod, PositionEmbeddingType
+from ...utils import divide_if_divisible
 from ..linear import ParameterizedLinear
 from ..position_embedding import apply_rotary_pos_emb
 from .utils import repeat_key_value
 
 
 class Attention(nn.Module):
-    def __init__(self, config: CommonConfig, causal: bool, layer_idx: int = None) -> None:
+    def __init__(self, config: CommonConfig, causal: bool, layer_idx: int | None = None) -> None:
         super().__init__()
 
         self.causal = causal
@@ -28,11 +28,12 @@ class Attention(nn.Module):
         n_layer = config.n_layer
         init_method = InitMethod(config.init_method)
 
-        assert (
-            self.hidden_size % self.num_heads == 0
-        ), f"`hidden_size` ({self.hidden_size}) must be divisible by `num_heads` ({self.num_heads})"
+        self.head_dim = divide_if_divisible(
+            self.hidden_size,
+            self.num_heads,
+            f"`hidden_size` ({self.hidden_size}) must be divisible by `num_heads` ({self.num_heads})",
+        )
 
-        self.head_dim = self.hidden_size // self.num_heads
         self.attention_head_type = AttentionHeadType(config.attention_head_type)
 
         self.position_embedding_type = PositionEmbeddingType(config.position_embedding_type)
@@ -41,9 +42,6 @@ class Attention(nn.Module):
 
         self.layer_idx = layer_idx
         self.attention_softmax_in_fp32 = config.attention_softmax_in_fp32
-        self.scale_attention_softmax_in_fp32 = (
-            config.scale_attention_softmax_in_fp32 and config.attention_softmax_in_fp32
-        )
 
         if self.attention_head_type == AttentionHeadType.mha:
             if self.num_key_value_heads is None:
@@ -57,9 +55,10 @@ class Attention(nn.Module):
                 self.num_key_value_heads is not None
             ), "`num_key_value_heads` needs to be specified with GroupedQueryAttention"
 
-            assert self.num_heads % self.num_key_value_heads == 0, (
-                f"`num_heads` ({self.num_heads}) should be a multiple of `num_key_value_heads` "
-                f"({self.num_key_value_heads})"
+            divide_if_divisible(
+                self.num_heads,
+                self.num_key_value_heads,
+                f"`num_heads` ({self.num_heads}) should be a multiple of `num_key_value_heads` ({self.num_key_value_heads})",
             )
         elif self.attention_head_type == AttentionHeadType.mqa:
             if self.num_key_value_heads is None:
@@ -92,7 +91,7 @@ class Attention(nn.Module):
         self.attn_dropout = nn.Identity() if self.attn_pdrop == 0 else nn.Dropout(self.attn_pdrop)
         self.resid_dropout = nn.Identity() if self.resid_pdrop == 0 else nn.Dropout(self.resid_pdrop)
 
-    def _prepare_qkv_for_forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _prepare_qkv_for_forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         # ==========================================================================================
         # hidden_states -> (batch_size, query_length, num_heads * head_dim)
         # ==========================================================================================
@@ -124,7 +123,7 @@ class Attention(nn.Module):
 
     def _prepare_qkv_for_forward_mha(
         self, hidden_states: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, query_length = hidden_states.shape[:-1]
 
         hidden_states = hidden_states.view(batch_size, query_length, self.num_heads, -1)
@@ -136,7 +135,7 @@ class Attention(nn.Module):
 
     def _prepare_qkv_for_forward_gqa(
         self, hidden_states: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, query_length = hidden_states.shape[:-1]
 
         hidden_states = hidden_states.view(batch_size, query_length, self.num_key_value_heads, -1)
@@ -156,7 +155,7 @@ class Attention(nn.Module):
 
     def _prepare_qkv_for_forward_mqa(
         self, hidden_states: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         batch_size, query_length = hidden_states.shape[:-1]
 
         query, key, value = hidden_states.split((self.hidden_size, self.head_dim, self.head_dim), dim=-1)
@@ -172,11 +171,11 @@ class Attention(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        past_key_values: DynamicCache = None,
-        attention_mask: torch.Tensor = None,
-        rope_cos_sin: torch.Tensor = None,
-        cu_seqlens: torch.Tensor = None,
-        max_seqlen: torch.Tensor = None,
+        past_key_values: DynamicCache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        rope_cos_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # ==========================================================================================
         # hidden_states -> (batch_size, query_length, num_heads * head_dim)
