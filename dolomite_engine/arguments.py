@@ -9,6 +9,7 @@ from transformers import AutoModelForCausalLM, AutoModelForSeq2SeqLM
 from .defaults import INPUT_FORMAT, OUTPUT_FORMAT
 from .enums import (
     AttentionImplementation,
+    DatasetType,
     DistributedBackend,
     ExperimentsTrackerName,
     FP8Backend,
@@ -37,6 +38,12 @@ class TokenizerArgs(BaseArgs):
     tokenizer_name: str | None = None
     # add special tokens to the tokenizer
     additional_special_tokens: list[str] | None = None
+    # chat template
+    chat_template: str | None = None
+    # Probability of using system prompt in training
+    system_probability: float = 0
+    # overwriting pad token
+    pad_token: str | None = None
 
 
 class ModelArgs(BaseArgs):
@@ -148,8 +155,6 @@ class TrainingParameters(BaseArgs):
     micro_batch_size: int = None
     # whether to use val dataset for validation during training
     eval_during_training: bool = True
-    # masking methodology of loss function input
-    loss_mask: LossMask = LossMask.output_only
     # gradient clip value
     gradient_clipping: float | None = 1
 
@@ -217,6 +222,10 @@ class DatasetArgs(BaseArgs):
     max_input_tokens: int | None = None
     # max tokens for output text
     max_output_tokens: int | None = None
+    # sample type
+    type: DatasetType = DatasetType.singleturn
+    # masking methodology of loss function input
+    loss_mask: LossMask = LossMask.output
 
     def model_post_init(self, __context: Any) -> None:
         _check_not_None([(self.class_name, "dataset class_name"), (self.data_name, "data_name")])

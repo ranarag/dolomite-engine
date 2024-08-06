@@ -71,6 +71,8 @@ def get_datasets_list(
             output_format=data_args.output_format,
             max_input_tokens=data_args.max_input_tokens,
             max_output_tokens=data_args.max_output_tokens,
+            type=data_args.type,
+            loss_mask=data_args.loss_mask,
             num_virtual_tokens=num_virtual_tokens,
         )
 
@@ -199,7 +201,6 @@ def _get_dispatching_dataloader(
         collate_fn=partial(
             collate_fn,
             mode=mode,
-            loss_mask=args.training_parameters.loss_mask,
             eos_token_id=tokenizer.eos_token_id,
             is_encoder_decoder=is_encoder_decoder,
             use_padding_free_transformer=args.model_args.use_padding_free_transformer,
@@ -263,7 +264,6 @@ def _get_non_dispatching_dataloader(
         collate_fn=partial(
             collate_fn,
             mode=mode,
-            loss_mask=args.training_parameters.loss_mask,
             eos_token_id=tokenizer.eos_token_id,
             is_encoder_decoder=is_encoder_decoder,
             use_padding_free_transformer=args.model_args.use_padding_free_transformer,

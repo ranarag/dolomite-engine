@@ -38,6 +38,9 @@ class ModelWrapper(nn.Module):
         trust_remote_code: bool = False,
         tokenizer_name: str | None = None,
         additional_special_tokens: list[str] | None = None,
+        chat_template: str | None = None,
+        system_probability: float | None = None,
+        pad_token: str | None = None,
     ) -> None:
         """initializes a model wrapper for a HuggingFace model
 
@@ -109,14 +112,30 @@ class ModelWrapper(nn.Module):
             if neft_alpha is not None and neft_alpha > 0:
                 self._override_embedding_forward_with_neft_forward(neft_alpha)
 
+        special_tokens_dict = dict()
+        if pad_token:
+            special_tokens_dict["pad_token"] = pad_token
+
         if additional_special_tokens is not None and len(additional_special_tokens) > 0:
+            special_tokens_dict["additional_special_tokens"] = additional_special_tokens
+        
+        if len(special_tokens_dict.keys()) > 0:
             original_vocab_size = len(self.tokenizer)
 
-            self.tokenizer.add_special_tokens({"additional_special_tokens": additional_special_tokens})
-            log_rank_0(logging.INFO, f"added {len(additional_special_tokens)} tokens")
+            self.tokenizer.add_special_tokens(special_tokens_dict)
+            log_rank_0(logging.INFO, f"added {len(additional_special_tokens)} tokens with {special_tokens_dict}")
 
             if len(self.tokenizer) != original_vocab_size:
                 self.model.resize_token_embeddings(len(self.tokenizer))
+
+        if chat_template is not None:
+            self.tokenizer.chat_template = chat_template
+
+        if system_probability is not None:
+            self.tokenizer.system_probability = system_probability
+
+        if pad_token:
+            self.model.config.pad_token_id = self.tokenizer.pad_token_id
 
     def generate(self, batch: dict, generate_kwargs: dict) -> list[str]:
         """generate function for a batch
@@ -156,7 +175,7 @@ class ModelWrapper(nn.Module):
                 assert key.startswith("model.")
                 state_dict[key.lstrip("model.")] = state_dict.pop(key)
 
-            self.config.save_pretrained(save_path)
+            self.model.config.save_pretrained(save_path)
             SafeTensorsWeightsManager.save_state_dict(state_dict, save_path)
 
     def _setup_config(self) -> None:

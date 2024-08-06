@@ -47,7 +47,8 @@ class ModelWrapperForFinetuning(ModelWrapper):
 
                 if self.tp_rank == 0:
                     input_ids, position_ids, _, labels, cu_seqlens, max_seqlen = convert_padding_free_lists_to_tensors(
-                        **batch
+                        input_ids=batch["input_ids"],
+                        labels=batch["labels"],
                     )
 
                     batch = {
@@ -82,7 +83,8 @@ class ModelWrapperForFinetuning(ModelWrapper):
         else:
             if self.use_padding_free_transformer:
                 input_ids, position_ids, _, labels, cu_seqlens, max_seqlen = convert_padding_free_lists_to_tensors(
-                    **batch
+                    input_ids=batch["input_ids"],
+                    labels=batch["labels"],
                 )
 
                 batch = {

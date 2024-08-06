@@ -37,6 +37,9 @@ def get_model(args: TrainingArgs | InferenceArgs | UnshardingArgs, mode: Mode) -
         "trust_remote_code": args.model_args.trust_remote_code,
         "tokenizer_name": args.tokenizer_args.tokenizer_name,
         "additional_special_tokens": args.tokenizer_args.additional_special_tokens,
+        "chat_template": args.tokenizer_args.chat_template,
+        "system_probability": args.tokenizer_args.system_probability,
+        "pad_token": args.tokenizer_args.pad_token,
     }
 
     # pretraining model wrapper needs some extra arguments for initialization

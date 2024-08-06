@@ -17,7 +17,7 @@ from .packages import (
     is_transformer_engine_available,
     is_triton_available,
 )
-from .parallel import ProcessGroupManager, run_rank_n
+from .parallel import ProcessGroupManager, run_rank_n, run_local_rank_n_first
 from .pydantic import BaseArgs
 from .random import CUDA_RNGStatesTracker, get_cuda_rng_tracker, set_cuda_rng_tracker
 from .safetensors import SafeTensorsWeightsManager

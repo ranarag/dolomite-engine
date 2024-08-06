@@ -48,6 +48,9 @@ class DatasetKeys(str, Enum):
 
     input = "input"
     output = "output"
+    conversation = "conversations"
+    role = "from"
+    content = "value"
     generated_text = "generated_text"
     num_generated_tokens = "num_generated_tokens"
 
@@ -74,8 +77,10 @@ class FP8Backend(str, Enum):
 class LossMask(str, Enum):
     """Type of loss masking method"""
 
-    output_only = "output_only"
+    output = "output"
+    output_prompted = "output_prompted"
     no_mask = "no_mask"
+    no_mask_prompted = "no_mask_prompted"
 
 
 class ExperimentsTrackerName(str, Enum):
@@ -83,3 +88,10 @@ class ExperimentsTrackerName(str, Enum):
 
     aim = "aim"
     wandb = "wandb"
+
+
+class DatasetType(str, Enum):
+    """Type of examples within dataset"""
+
+    singleturn = "singleturn"
+    multiturn = "multiturn"

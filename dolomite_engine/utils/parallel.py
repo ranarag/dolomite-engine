@@ -307,3 +307,16 @@ def run_rank_n(func: Callable, rank: int = 0, barrier: bool = False) -> Callable
         wrapped_func = func_rank_other
 
     return wrapped_func
+
+
+@contextmanager
+def run_local_rank_n_first(rank: int = 0):
+    """Runs context on all ranks. Runs a single instance first on every node
+    """
+    if ProcessGroupManager.get_local_rank() != rank:
+        torch.distributed.barrier()
+
+    yield
+
+    if ProcessGroupManager.get_local_rank() == rank:
+        torch.distributed.barrier()
