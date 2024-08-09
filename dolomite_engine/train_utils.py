@@ -92,6 +92,8 @@ def train_step(
             grad_norm = model.get_global_grad_norm()
 
         model.step()
+
+        grad_norm = 0 if grad_norm is None else grad_norm
     elif distributed_backend == DistributedBackend.torch:
         with backward_context():
             loss_micro_step.backward()
@@ -104,6 +106,8 @@ def train_step(
 
         optimizer.step()
         lr_scheduler.step()
+
+        grad_norm = 0 if grad_norm is None else grad_norm.item()
     else:
         raise ValueError(f"unexpected distributed backend ({distributed_backend})")
 
@@ -111,7 +115,6 @@ def train_step(
     torch.distributed.all_reduce(loss, op=ReduceOp.AVG, group=ProcessGroupManager.get_data_parallel_group())
 
     loss = loss.item()
-    grad_norm = 0 if grad_norm is None else grad_norm.item()
 
     return loss, grad_norm
 
