@@ -222,6 +222,8 @@ class DatasetArgs(BaseArgs):
     max_input_tokens: int | None = None
     # max tokens for output text
     max_output_tokens: int | None = None
+     # max total for tokens text
+    max_total_tokens: int | None = None
     # sample type
     type: DatasetType = DatasetType.singleturn
     # masking methodology of loss function input
@@ -510,14 +512,14 @@ class UnshardingArgs(BaseArgs):
     # load related arguments
     load_args: LoadArgs = None
     # unsharded path
-    unsharded_path: str = None
+    unsharded_path: str | None = None
     # mixed precision related arguments
     mixed_precision_args: MixedPrecisionArgs = MixedPrecisionArgs()
     # logging related arguments
     logging_args: LoggingArgs = LoggingArgs()
 
     def model_post_init(self, __context: Any) -> None:
-        _check_not_None([(self.load_args, "load_args"), (self.unsharded_path, "unsharded_path")])
+        _check_not_None([(self.load_args, "load_args")]) # (self.unsharded_path, "unsharded_path")
 
 
 _MODE_ARGS_MAP = {

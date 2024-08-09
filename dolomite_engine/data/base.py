@@ -25,6 +25,7 @@ class BaseDataset(torch.utils.data.Dataset):
         output_format: str,
         max_input_tokens: int,
         max_output_tokens: int,
+        max_total_tokens: int,
         loss_mask: LossMask,
         num_virtual_tokens: int = 0,
     ) -> None:
@@ -57,6 +58,7 @@ class BaseDataset(torch.utils.data.Dataset):
         self.max_output_tokens = get_max_output_length(
             max_output_tokens, self.num_virtual_tokens, self.is_encoder_decoder
         )
+        self.max_total_tokens = max_total_tokens
 
         self.examples = []
 
@@ -165,6 +167,10 @@ class BaseDataset(torch.utils.data.Dataset):
             (self.do_format_output or self.do_format_input) or self.tokenizer.chat_template is not None
         ), "Must specify either an input/output format or chat template to use multiturn samples"
 
+        assert (
+            self.max_input_tokens is None and self.max_output_tokens is None
+        ), "Must use `max_total_tokens` for truncating multiturn datasets. Please unset `max_input_tokens` and `max_output_tokens`"
+
         if self.do_format_output or self.do_format_input:
             if self.tokenizer.chat_template is not None:
                 log_rank_0(logging.INFO, f"Overriding tokenizer chat template with `{self.data_name}`'s format")
@@ -224,7 +230,11 @@ class BaseDataset(torch.utils.data.Dataset):
                             ).shape[1]
 
                         labels[:, message_start_idx:message_end_idx] = -100
-
+        if self.max_total_tokens:
+            return {
+                "input_ids": input_ids.flatten()[:self.max_total_tokens],
+                "labels": labels.flatten()[:self.max_total_tokens],
+            }
         return {
             "input_ids": input_ids.flatten(),
             "labels": labels.flatten(),

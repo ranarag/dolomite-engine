@@ -25,6 +25,7 @@ class HuggingFaceDataset(BaseDataset):
         output_format: str,
         max_input_tokens: int,
         max_output_tokens: int,
+        max_total_tokens: int,
         type: DatasetType,
         loss_mask: LossMask,
         num_virtual_tokens: int = 0,
@@ -40,6 +41,7 @@ class HuggingFaceDataset(BaseDataset):
             output_format=output_format,
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
+            max_total_tokens=max_total_tokens,
             loss_mask=loss_mask,
             num_virtual_tokens=num_virtual_tokens,
         )

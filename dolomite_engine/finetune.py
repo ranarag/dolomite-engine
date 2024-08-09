@@ -2,6 +2,7 @@ import logging
 from contextlib import nullcontext
 from functools import partial
 
+import time
 import torch
 from torch.distributed import ReduceOp
 from torch.distributed.tensor.parallel import loss_parallel
@@ -104,6 +105,7 @@ def train(
         torch_profiler.__enter__()
 
     loss_running_sum = 0
+    start_time = time.perf_counter()
 
     global_step = starting_iteration
     while global_step < num_training_steps:
@@ -127,6 +129,8 @@ def train(
             torch_profiler.step()
 
         if global_step % log_interval == 0:
+            step_time = (time.perf_counter() - start_time) / log_interval
+
             track_train_metrics(
                 global_step=global_step,
                 train_loss_step=loss_step,
@@ -138,9 +142,11 @@ def train(
                 ),
                 experiments_tracker=experiments_tracker,
                 loss_running_mean=loss_running_sum / log_interval,
+                step_time=step_time,
             )
 
             loss_running_sum = 0
+            start_time = time.perf_counter()
 
         if eval_during_training and (global_step % eval_interval == 0 or global_step == num_training_steps):
             evaluate(val_dataloader, model, global_step, experiments_tracker)

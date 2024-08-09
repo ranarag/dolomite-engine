@@ -71,6 +71,7 @@ def get_datasets_list(
             output_format=data_args.output_format,
             max_input_tokens=data_args.max_input_tokens,
             max_output_tokens=data_args.max_output_tokens,
+            max_total_tokens=data_args.max_total_tokens,
             type=data_args.type,
             loss_mask=data_args.loss_mask,
             num_virtual_tokens=num_virtual_tokens,
