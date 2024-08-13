@@ -28,6 +28,9 @@ _Neel Jain, Ping-yeh Chiang, Yuxin Wen, John Kirchenbauer, Hong-Min Chu, Gowtham
 1. [Parallelizing Linear Transformers with the Delta Rule over Sequence Length](https://arxiv.org/abs/2406.06484)  
 _Songlin Yang, Bailin Wang, Yu Zhang, Yikang Shen, Yoon Kim_  
 ![image][Model Architecture] ![image][Efficient Training] ![image][Efficient Inference]
+1. [Scattered Mixture-of-Experts Implementation](https://arxiv.org/abs/2403.08245)  
+_Shawn Tan, Yikang Shen, Rameswar Panda, Aaron Courville_  
+![image][Mixture of Experts] ![image][Efficient Training] ![image][Efficient Inference]
 
 # Getting Started
 Run `make install` to install the requirements for this repository. You might need to install `flash-attn`.
@@ -118,6 +121,11 @@ sh scripts/generate.sh configs/sst2/inference.yml
 ```shell
 sh scripts/unshard.sh configs/sst2/unshard.yml
 ```
+
+## Running basic inference
+
+For a simple HuggingFace inference example, refer to [tools/inference.py](tools/inference.py).
+For an example running tensor parallel inference, refer to [tools/tensor_parallel_inference.py](tools/tensor_parallel_inference.py).
 
 ## Using custom datasets
 The data directory should obey the following structure:

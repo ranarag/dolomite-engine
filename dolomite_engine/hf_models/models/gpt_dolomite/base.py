@@ -7,7 +7,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from ...defaults import DEFAULT_NORMALIZATION_IMPLEMENTATION
 from ...enums import AttentionHeadType, PositionEmbeddingType
-from ...modeling_utils import Alibi, ParameterizedEmbedding, RMSNorm, RoPE, YaRNScaledRoPE, get_normalization_function
+from ...modeling_utils import Alibi, ParameterizedEmbedding, RoPE, YaRNScaledRoPE, get_normalization_function
 from ...utils import convert_padding_free_lists_to_tensors, divide_if_divisible
 from .config import GPTDolomiteConfig
 from .layer import GPTDolomiteBlock
@@ -27,8 +27,8 @@ class GPTDolomitePreTrainedModel(PreTrainedModel):
     _supports_sdpa = True
     _supports_flash_attn_2 = True
 
-    def __init__(self, config: GPTDolomiteConfig, *inputs, **kwargs) -> None:
-        super().__init__(config, *inputs, **kwargs)
+    def __init__(self, config: GPTDolomiteConfig, *args, **kwargs) -> None:
+        super().__init__(config, *args, **kwargs)
 
         self.normalization_implementation = kwargs.get(
             "normalization_implementation", DEFAULT_NORMALIZATION_IMPLEMENTATION
@@ -62,7 +62,7 @@ class GPTDolomitePreTrainedModel(PreTrainedModel):
         )
 
     def _init_weights(self, module: nn.Module) -> None:
-        if isinstance(module, (nn.Embedding, nn.Linear, nn.LayerNorm, RMSNorm, Alibi, RoPE)):
+        if isinstance(module, (nn.Embedding, nn.Linear, nn.LayerNorm, nn.RMSNorm, Alibi, RoPE)):
             module.reset_parameters()
 
     def prepare_inputs_for_model(
@@ -140,9 +140,9 @@ class GPTDolomiteModel(GPTDolomitePreTrainedModel):
             [
                 GPTDolomiteBlock(
                     config,
-                    self.normalization_implementation,
-                    self.attention_implementation,
-                    self._use_padding_free_transformer,
+                    normalization_implementation=self.normalization_implementation,
+                    attention_implementation=self.attention_implementation,
+                    use_padding_free_transformer=self._use_padding_free_transformer,
                     layer_idx=i,
                 )
                 for i in range(config.num_hidden_layers)
@@ -506,29 +506,9 @@ class GPTDolomiteModel(GPTDolomitePreTrainedModel):
         #     rope_cos_sin -> 2 * (key_length, head_dim)
         # ==========================================================================================
 
-        # prepare causal mask only if not using flash attention
-        if self._use_sdpa:
-            # we use the causal/non-causal argument of SDPA for attention in this case
-            if attention_mask is not None:
-                attention_mask = self._prepare_causal_attention_mask(
-                    attention_mask, batch_size, query_length, key_length, device
-                )
-
-                attention_mask = torch.where(
-                    attention_mask,
-                    ~attention_mask if alibi_bias is None else alibi_bias,
-                    self._get_mask_value(attention_mask.device, hidden_states.dtype),
-                )
-        elif self._use_eager_attention:
-            attention_mask = self._prepare_causal_attention_mask(
-                attention_mask, batch_size, query_length, key_length, device
-            )
-
-            attention_mask = torch.where(
-                attention_mask,
-                ~attention_mask if alibi_bias is None else alibi_bias,
-                self._get_mask_value(attention_mask.device, hidden_states.dtype),
-            )
+        attention_mask = self._get_maybe_causal_mask(
+            attention_mask, alibi_bias, batch_size, query_length, key_length, hidden_states.dtype, device
+        )
 
         return (
             output_hidden_states,
@@ -573,5 +553,46 @@ class GPTDolomiteModel(GPTDolomitePreTrainedModel):
     def _get_mask_value(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         # torch.where expects a tensor. We use a cache to avoid recreating it every time.
         if self.mask_value is None or self.mask_value.dtype != dtype or self.mask_value.device != device:
-            self.mask_value = torch.full([], torch.finfo(torch.float16).min, dtype=dtype, device=device)
+            self.mask_value = torch.full([], torch.finfo(dtype).min, dtype=dtype, device=device)
         return self.mask_value
+
+    def _get_maybe_causal_mask(
+        self,
+        attention_mask: torch.Tensor | None,
+        alibi_bias: torch.Tensor | None,
+        batch_size: int,
+        query_length: int,
+        key_length: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        if self._use_sdpa:
+            # we use the causal/non-causal argument of SDPA for attention in this case
+            if attention_mask is not None:
+                attention_mask = self._prepare_causal_attention_mask(
+                    attention_mask, batch_size, query_length, key_length, device
+                )
+
+                attention_mask = torch.where(
+                    attention_mask,
+                    ~attention_mask if alibi_bias is None else alibi_bias,
+                    self._get_mask_value(attention_mask.device, dtype),
+                )
+
+                # this is needed to prevent NaN since SDPA
+                # see issue: https://github.com/pytorch/pytorch/issues/110213
+                attention_mask = attention_mask * ~torch.all(
+                    attention_mask == self._get_mask_value(attention_mask.device, dtype), dim=-1, keepdim=True
+                )
+        elif self._use_eager_attention:
+            attention_mask = self._prepare_causal_attention_mask(
+                attention_mask, batch_size, query_length, key_length, device
+            )
+
+            attention_mask = torch.where(
+                attention_mask,
+                ~attention_mask if alibi_bias is None else alibi_bias,
+                self._get_mask_value(attention_mask.device, dtype),
+            )
+
+        return attention_mask

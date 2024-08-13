@@ -69,6 +69,10 @@ class TestCommons(TestCase):
         add_bias: bool = True,
         activation_function: str = "gelu_pytorch_tanh",
         normalization_function: str = "layernorm",
+        m_emb: float = None,
+        m_width: float = None,
+        m_residual: float = None,
+        attention_multiplier: float = None,
     ) -> GPTDolomiteConfig:
         return GPTDolomiteConfig(
             vocab_size=2048,
@@ -86,6 +90,10 @@ class TestCommons(TestCase):
             bos_token_id=0,
             eos_token_id=1,
             pad_token_id=2,
+            m_emb=m_emb,
+            m_width=m_width,
+            m_residual=m_residual,
+            attention_multiplier=attention_multiplier,
         )
 
     @staticmethod
@@ -98,6 +106,10 @@ class TestCommons(TestCase):
         add_bias: bool = True,
         activation_function: str = "gelu_pytorch_tanh",
         normalization_function: str = "layernorm",
+        m_emb: float = None,
+        m_width: float = None,
+        m_residual: float = None,
+        attention_multiplier: float = None,
     ) -> MoEDolomiteConfig:
         return MoEDolomiteConfig(
             vocab_size=2048,
@@ -117,6 +129,10 @@ class TestCommons(TestCase):
             bos_token_id=0,
             eos_token_id=1,
             pad_token_id=2,
+            m_emb=m_emb,
+            m_width=m_width,
+            m_residual=m_residual,
+            attention_multiplier=attention_multiplier,
         )
 
     def get_dummy_inputs(self, device: torch.device, return_list: bool = False) -> tuple[torch.Tensor | list[int]]:
@@ -216,6 +232,8 @@ class TestCommons(TestCase):
 
         attention_implementation = kwargs.pop("attn_implementation", None)
         use_padding_free_transformer = kwargs.pop("use_padding_free_transformer", False)
+        moe_implementation = kwargs.pop("moe_implementation", None)
+
         if use_padding_free_transformer:
             assert model._use_padding_free_transformer
 
@@ -230,6 +248,11 @@ class TestCommons(TestCase):
                 assert "PaddingFreeAttention" in str(model)
             else:
                 assert "FlashAttention2" in str(model)
+
+        if moe_implementation == "eager":
+            assert "SparseMoE" in str(model)
+        elif moe_implementation == "scattermoe":
+            assert "ScatterMoE" in str(model)
 
         kwargs.pop("torch_dtype", None)
         assert len(kwargs) == 0

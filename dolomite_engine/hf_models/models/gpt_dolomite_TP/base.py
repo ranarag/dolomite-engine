@@ -13,8 +13,8 @@ from .layer import GPTDolomiteBlock_TP
 class GPTDolomitePreTrainedModel_TP(GPTDolomitePreTrainedModel):
     _no_split_modules = ["GPTDolomiteBlock_TP"]
 
-    def __init__(self, config: GPTDolomiteConfig, *inputs, **kwargs):
-        GPTDolomitePreTrainedModel.__init__(self, config, *inputs, **kwargs)
+    def __init__(self, config: GPTDolomiteConfig, *args, **kwargs):
+        GPTDolomitePreTrainedModel.__init__(self, config, *args, **kwargs)
 
         self.tensor_parallel_word_embeddings = kwargs.get("tensor_parallel_word_embeddings", False)
         self.sequence_parallel = kwargs.get("sequence_parallel", False)
@@ -42,14 +42,22 @@ class GPTDolomiteModel_TP(GPTDolomitePreTrainedModel_TP, GPTDolomiteModel):
             sequence_parallel=self.sequence_parallel,
         )
 
-        self.drop = nn.Identity() if config.embd_pdrop == 0 else Dropout_TP(config.embd_pdrop)
+        self.drop = (
+            nn.Identity()
+            if config.embd_pdrop == 0
+            else Dropout_TP(
+                config.embd_pdrop,
+                use_padding_free_transformer=self._use_padding_free_transformer,
+                sequence_parallel=self.sequence_parallel,
+            )
+        )
         self.h = nn.ModuleList(
             [
                 GPTDolomiteBlock_TP(
                     config,
-                    self.normalization_implementation,
-                    self.attention_implementation,
-                    self._use_padding_free_transformer,
+                    normalization_implementation=self.normalization_implementation,
+                    attention_implementation=self.attention_implementation,
+                    use_padding_free_transformer=self._use_padding_free_transformer,
                     layer_idx=i,
                     sequence_parallel=self.sequence_parallel,
                 )
