@@ -75,7 +75,7 @@ class HuggingFaceDataset(BaseDataset):
                     self.get_multiturn_ids([
                         # Huggingface standardized keys for apply_chat_template
                         {
-                            "role": message[conversation_role_key], 
+                            "role": message[conversation_role_key].lower(), 
                             "content": message[conversation_content_key]
                         } for message in x[conversation_key]]
                         if conversation_role_key != "role" or conversation_content_key != "content" else 

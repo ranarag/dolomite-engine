@@ -95,12 +95,12 @@ def save_checkpoint(
             ):
                 model_state_dict = model.state_dict()
                 if dp_rank == 0:
-                    torch.save(model_state_dict, f"{_get_model_path(save_path)}.pt")
+                    torch.save(model_state_dict, f"{_get_model_path(save_path)}")
 
                 if save_optimizer:
                     optimizer_state_dict = FSDP.optim_state_dict(model=model, optim=optimizer)
                     if dp_rank == 0:
-                        torch.save(optimizer_state_dict, f"{_get_optimizer_path(save_path)}.pt")
+                        torch.save(optimizer_state_dict, f"{_get_optimizer_path(save_path)}")
         else:
             dcp.save(get_model_state_dict(model), checkpoint_id=_get_model_path(save_path))
 
@@ -206,14 +206,14 @@ def load_checkpoint_for_training(
                 state_dict_config=FullStateDictConfig(offload_to_cpu=True, rank0_only=False),
                 optim_state_dict_config=FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=False),
             ):
-                model.load_state_dict(torch.load(f"{_get_model_path(load_path)}.pt", map_location="cpu"))
+                model.load_state_dict(torch.load(f"{_get_model_path(load_path)}", map_location="cpu"))
 
                 if load_optimizer:
                     optimizer.load_state_dict(
                         FSDP.optim_state_dict_to_load(
                             model=model,
                             optim=optimizer,
-                            optim_state_dict=torch.load(f"{_get_optimizer_path(load_path)}.pt", map_location="cpu"),
+                            optim_state_dict=torch.load(f"{_get_optimizer_path(load_path)}", map_location="cpu"),
                         )
                     )
         else:
@@ -311,16 +311,16 @@ def load_checkpoint_for_inference(
         if use_meta:
             model = model.to_empty(device="cpu")
 
-        if model.tuning_method == TuningMethod.prompt_tuning:
-            strict = False
-        elif model.tuning_method in [TuningMethod.pretraining, TuningMethod.full_finetuning]:
-            dtype = string_to_torch_dtype(model.dtype)
-            for key in list(state.keys()):
-                state[key] = state[key].to(dtype)
-                # fix for gradient checkpointing
-                state[key.replace(f".{_CHECKPOINT_WRAPPED_MODULE}", "")] = state.pop(key)
+        # if model.tuning_method == TuningMethod.prompt_tuning:
+        #     strict = False
+        # elif model.tuning_method in [TuningMethod.pretraining, TuningMethod.full_finetuning]:
+        dtype = string_to_torch_dtype(model.dtype)
+        for key in list(state.keys()):
+            state[key] = state[key].to(dtype)
+            # fix for gradient checkpointing
+            state[key.replace(f".{_CHECKPOINT_WRAPPED_MODULE}", "")] = state.pop(key)
 
-            strict = True
+        strict = True
 
         model.load_state_dict(state, strict=strict)
     elif distributed_backend == DistributedBackend.torch:
@@ -454,11 +454,11 @@ def _get_base_path(path: str, iteration: int) -> str:
 
 
 def _get_model_path(path: str) -> str:
-    return os.path.join(path, "model")
+    return os.path.join(path, "model.pt")
 
 
 def _get_optimizer_path(path: str) -> str:
-    return os.path.join(path, "optimizer")
+    return os.path.join(path, "optimizer.pt")
 
 
 def _get_lr_scheduler_path(path: str) -> str:
