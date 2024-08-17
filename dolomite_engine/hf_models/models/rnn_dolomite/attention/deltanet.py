@@ -20,20 +20,7 @@ if is_fla_available():
     from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_linear_attn_delta_rule
 
 
-def simple_norm(x: torch.Tensor) -> torch.Tensor:
-    return F.normalize(x, dim=-1) * x.shape[-1] ** 0.5
-
-
-def elu_p1(x: torch.Tensor) -> torch.Tensor:
-    return F.elu(x) + 1
-
-
 def sum_norm(x: torch.Tensor) -> torch.Tensor:
-    return x / x.sum(-1, keepdim=True)
-
-
-def elu_norm(x: torch.Tensor) -> torch.Tensor:
-    x = elu_p1(x)
     return x / x.sum(-1, keepdim=True)
 
 
@@ -205,8 +192,8 @@ class DeltaNet(nn.Module):
                 q = F.relu(q)
                 k = F.relu(k)
             elif self.qk_activation == "elu":
-                q = elu_p1(q)
-                k = elu_p1(k)
+                q = F.elu(q) + 1
+                k = F.elu(k) + 1
             elif self.qk_activation == "identity":
                 pass
             else:
