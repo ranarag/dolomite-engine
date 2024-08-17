@@ -1,9 +1,4 @@
-# -*- coding: utf-8 -*-
-
-# Sect4.2 of Linear Transformers Are Secretly Fast Weight Programmers https://arxiv.org/abs/2102.11174
-
 import math
-from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -25,18 +20,20 @@ if is_fla_available():
     from fla.ops.delta_rule import chunk_delta_rule, fused_chunk_delta_rule, fused_recurrent_linear_attn_delta_rule
 
 
-@torch.compile
 def simple_norm(x: torch.Tensor) -> torch.Tensor:
     return F.normalize(x, dim=-1) * x.shape[-1] ** 0.5
 
 
-@torch.compile
 def elu_p1(x: torch.Tensor) -> torch.Tensor:
     return F.elu(x) + 1
 
 
-@torch.compile
 def sum_norm(x: torch.Tensor) -> torch.Tensor:
+    return x / x.sum(-1, keepdim=True)
+
+
+def elu_norm(x: torch.Tensor) -> torch.Tensor:
+    x = elu_p1(x)
     return x / x.sum(-1, keepdim=True)
 
 
@@ -48,10 +45,10 @@ if is_fla_available():
             hidden_size: int,
             kernel_size: int,
             bias: bool = False,
-            activation: Optional[str] = "silu",
-            use_causal_conv: Optional[bool] = True,
-            std: Optional[float] = None,
-        ):
+            activation: str = "silu",
+            use_causal_conv: bool = True,
+            std: float | None = None,
+        ) -> None:
             self.std = std
             super().__init__(hidden_size, kernel_size, bias, activation, use_causal_conv)
 
@@ -69,7 +66,7 @@ class DeltaNet(nn.Module):
     def __init__(
         self,
         config: CommonConfig,
-        layer_idx: int = None,
+        layer_idx: int | None = None,
         mode: str = "chunk",
         chunk_size: int = 64,
         use_beta: bool = True,
@@ -155,11 +152,11 @@ class DeltaNet(nn.Module):
     def forward(
         self,
         hidden_states: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        past_key_values: Optional[Cache] = None,
-        rope_cos_sin: torch.Tensor = None,
-        cu_seqlens: torch.Tensor = None,
-        max_seqlen: torch.Tensor = None,
+        attention_mask: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        rope_cos_sin: torch.Tensor | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if past_key_values is not None:
             assert isinstance(past_key_values, FLACache)
@@ -265,7 +262,7 @@ class DeltaNet(nn.Module):
 
         return o
 
-    def init_state(self, batch_size: int) -> Tuple[torch.Tensor]:
+    def init_state(self, batch_size: int) -> tuple[torch.Tensor]:
         param = next(self.parameters())
         state = tuple()
         if self.use_short_conv:

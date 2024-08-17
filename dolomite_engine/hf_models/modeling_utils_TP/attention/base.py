@@ -1,5 +1,4 @@
 import math
-from typing import Tuple
 
 import torch
 import torch.distributed
@@ -11,11 +10,18 @@ from ...enums import AttentionHeadType, InitMethod, PositionEmbeddingType
 from ...modeling_utils import Attention
 from ...utils import divide_if_divisible
 from ..dropout import Dropout_TP
-from ..linear import ColumnParallelLinear, RowParallelLinear, TensorParallelSharedLinear
+from ..linear import ColumnParallelLinear, ReplicatedLinear, RowParallelLinear
 
 
-class Attention_TP(Attention):
-    def __init__(self, config: CommonConfig, causal: bool, layer_idx: int = None) -> None:
+class _BaseAttention_TP(nn.Module):
+    def __init__(
+        self,
+        config: CommonConfig,
+        causal: bool,
+        layer_idx: int | None = None,
+        use_padding_free_transformer: bool = False,
+        sequence_parallel: bool = False,
+    ) -> None:
         nn.Module.__init__(self)
 
         tp_world_size = ProcessGroupManager.get_tensor_parallel_world_size()
@@ -54,9 +60,6 @@ class Attention_TP(Attention):
 
         self.layer_idx = layer_idx
         self.attention_softmax_in_fp32 = config.attention_softmax_in_fp32
-        self.scale_attention_softmax_in_fp32 = (
-            config.scale_attention_softmax_in_fp32 and config.attention_softmax_in_fp32
-        )
 
         std = initializer_range
         if init_method == InitMethod.mup:
@@ -77,6 +80,8 @@ class Attention_TP(Attention):
                 self.global_hidden_size + 2 * self.global_num_key_value_heads * self.head_dim,
                 bias=self.add_bias,
                 std=std,
+                use_padding_free_transformer=use_padding_free_transformer,
+                sequence_parallel=sequence_parallel,
             )
         elif self.attention_head_type == AttentionHeadType.gqa:
             assert (
@@ -105,6 +110,8 @@ class Attention_TP(Attention):
                 self.global_hidden_size + 2 * self.global_num_key_value_heads * self.head_dim,
                 bias=self.add_bias,
                 std=std,
+                use_padding_free_transformer=use_padding_free_transformer,
+                sequence_parallel=sequence_parallel,
             )
         elif self.attention_head_type == AttentionHeadType.mqa:
             if self.global_num_key_value_heads is None:
@@ -116,20 +123,45 @@ class Attention_TP(Attention):
 
             self.num_key_value_heads = 1
 
-            self.c_attn = _MQA_QueryKeyValueProjection(config)
+            self.c_attn = _MQA_QueryKeyValueProjection(
+                config, use_padding_free_transformer=use_padding_free_transformer, sequence_parallel=sequence_parallel
+            )
         else:
             raise ValueError(f"unexpected attention_head_type ({self.attention_head_type})")
 
         std = initializer_range / math.sqrt(2 * n_layer)
         if init_method == InitMethod.mup:
             std /= math.sqrt(m_width)
-        self.c_proj = RowParallelLinear(self.global_hidden_size, self.global_hidden_size, bias=self.add_bias, std=std)
+        self.c_proj = RowParallelLinear(
+            self.global_hidden_size,
+            self.global_hidden_size,
+            bias=self.add_bias,
+            std=std,
+            use_padding_free_transformer=use_padding_free_transformer,
+            sequence_parallel=sequence_parallel,
+        )
 
         self.attn_pdrop = config.attn_pdrop
         self.resid_pdrop = config.resid_pdrop
 
-        self.attn_dropout = nn.Identity() if self.attn_pdrop == 0 else Dropout_TP(self.attn_pdrop)
-        self.resid_dropout = nn.Identity() if self.resid_pdrop == 0 else Dropout_TP(self.resid_pdrop)
+        self.attn_dropout = (
+            nn.Identity()
+            if self.attn_pdrop == 0
+            else Dropout_TP(
+                self.attn_pdrop,
+                use_padding_free_transformer=use_padding_free_transformer,
+                sequence_parallel=sequence_parallel,
+            )
+        )
+        self.resid_dropout = (
+            nn.Identity()
+            if self.resid_pdrop == 0
+            else Dropout_TP(
+                self.resid_pdrop,
+                use_padding_free_transformer=use_padding_free_transformer,
+                sequence_parallel=sequence_parallel,
+            )
+        )
 
     def load_from_safetensors_weights_manager(
         self, safetensors_weight_manager: SafeTensorsWeightsManager, prefix: str = ""
@@ -138,8 +170,8 @@ class Attention_TP(Attention):
         self.c_proj.load_from_safetensors_weights_manager(safetensors_weight_manager, prefix=prefix + "c_proj.")
 
     def _prepare_qkv_for_forward_mqa(
-        self, query_key_value: Tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self, query_key_value: tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         query, key, value = query_key_value
         batch_size, query_length = query.shape[:-1]
 
@@ -153,7 +185,9 @@ class Attention_TP(Attention):
 
 
 class _MQA_QueryKeyValueProjection(nn.Module):
-    def __init__(self, config: CommonConfig) -> None:
+    def __init__(
+        self, config: CommonConfig, use_padding_free_transformer: bool = False, sequence_parallel: bool = False
+    ) -> None:
         super().__init__()
 
         self.global_hidden_size = config.n_embd
@@ -180,17 +214,27 @@ class _MQA_QueryKeyValueProjection(nn.Module):
         if init_method == InitMethod.mup:
             std /= math.sqrt(m_width)
         self.q_attn = ColumnParallelLinear(
-            self.global_hidden_size, self.global_hidden_size, bias=self.add_bias, std=std
+            self.global_hidden_size,
+            self.global_hidden_size,
+            bias=self.add_bias,
+            std=std,
+            use_padding_free_transformer=use_padding_free_transformer,
+            sequence_parallel=sequence_parallel,
         )
 
         std = initializer_range / math.sqrt(2 * n_layer)
         if init_method == InitMethod.mup:
             std /= math.sqrt(m_width)
-        self.kv_attn = TensorParallelSharedLinear(
-            self.global_hidden_size, 2 * self.head_dim, bias=self.add_bias, std=std
+        self.kv_attn = ReplicatedLinear(
+            self.global_hidden_size,
+            2 * self.head_dim,
+            bias=self.add_bias,
+            std=std,
+            use_padding_free_transformer=use_padding_free_transformer,
+            sequence_parallel=sequence_parallel,
         )
 
-    def forward(self, hidden_states: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         query = self.q_attn(hidden_states)
 
         key_value = self.kv_attn(hidden_states)
@@ -220,3 +264,21 @@ class _MQA_QueryKeyValueProjection(nn.Module):
 
         self.q_attn.load_state_dict(q_attn_state_dict)
         self.kv_attn.load_state_dict(kv_attn_state_dict)
+
+
+class Attention_TP(_BaseAttention_TP, Attention):
+    def __init__(
+        self,
+        config: CommonConfig,
+        causal: bool,
+        layer_idx: int | None = None,
+        sequence_parallel: bool = False,
+    ) -> None:
+        _BaseAttention_TP.__init__(
+            self,
+            config,
+            causal,
+            layer_idx=layer_idx,
+            use_padding_free_transformer=False,
+            sequence_parallel=sequence_parallel,
+        )

@@ -1,5 +1,3 @@
-from typing import List, Tuple, Union
-
 import torch
 import torch.nn as nn
 from transformers import Cache
@@ -7,9 +5,9 @@ from transformers.modeling_outputs import BaseModelOutputWithPast
 
 from ....utils import is_fla_available
 from ...enums import AttentionHeadType, PositionEmbeddingType
+from ...mixins import BaseModelMixin, PreTrainedModelMixin
 from ...modeling_utils import ParameterizedEmbedding, get_normalization_function
 from ...utils import divide_if_divisible
-from ..gpt_dolomite import GPTDolomiteModel, GPTDolomitePreTrainedModel
 from .config import RNNDolomiteConfig
 from .layer import RNNDolomiteBlock
 
@@ -18,32 +16,25 @@ if is_fla_available():
     from fla.models.utils import Cache as FLACache
 
 
-class RNNDolomitePreTrainedModel(GPTDolomitePreTrainedModel):
-    """
-    An abstract class to handle weights initialization and a simple interface for downloading and loading pretrained
-    models.
-    """
-
+class RNNDolomitePreTrainedModel(PreTrainedModelMixin):
     config_class = RNNDolomiteConfig
+    layer_class = RNNDolomiteBlock
     _no_split_modules = ["RNNDolomiteBlock"]
     _supports_sdpa = False
-    _supports_flash_attn_2 = True
 
-    def __init__(self, config: RNNDolomiteConfig, *inputs, **kwargs):
-        super().__init__(config, *inputs, **kwargs)
+    def __init__(self, config: RNNDolomiteConfig, *args, **kwargs):
+        super().__init__(config, *args, **kwargs)
 
         assert not self._use_padding_free_transformer, "RNN models are not implemented with padding free transformer"
 
 
-class RNNDolomiteModel(RNNDolomitePreTrainedModel, GPTDolomiteModel):
-    mask_value = None
-
+class RNNDolomiteModel(RNNDolomitePreTrainedModel, BaseModelMixin):
     def __init__(self, config: RNNDolomiteConfig, **kwargs) -> None:
-        RNNDolomitePreTrainedModel.__init__(self, config, **kwargs)
+        super().__init__(config, **kwargs)
 
         self.attention_head_type = AttentionHeadType(config.attention_head_type)
-        self.embed_dim = config.hidden_size
-        self.num_heads = config.num_attention_heads
+        self.embed_dim = config.n_embd
+        self.num_heads = config.n_head
         self.m_emb = config.m_emb
         self.initializer_range = config.initializer_range
 
@@ -60,14 +51,14 @@ class RNNDolomiteModel(RNNDolomitePreTrainedModel, GPTDolomiteModel):
         self.drop = nn.Identity() if config.embd_pdrop == 0 else nn.Dropout(config.embd_pdrop)
         self.h = nn.ModuleList(
             [
-                RNNDolomiteBlock(
+                self.layer_class(
                     config,
-                    self.normalization_implementation,
-                    self.attention_patterns[i],
-                    self._use_padding_free_transformer,
+                    normalization_implementation=self.normalization_implementation,
+                    attention_implementation=self.attention_patterns[i],
+                    use_padding_free_transformer=self._use_padding_free_transformer,
                     layer_idx=i,
                 )
-                for i in range(config.num_hidden_layers)
+                for i in range(config.n_layer)
             ]
         )
         self.ln_f = get_normalization_function(
@@ -83,7 +74,7 @@ class RNNDolomiteModel(RNNDolomitePreTrainedModel, GPTDolomiteModel):
         # Initialize weights and apply final processing
         self.post_init()
 
-    def mapping_attention_patterns(self, attention_patterns: str) -> List[str]:
+    def mapping_attention_patterns(self, attention_patterns: str) -> list[str]:
         attention_implementation_list = []
         for pattern in attention_patterns:
             if pattern == "a":
@@ -96,23 +87,22 @@ class RNNDolomiteModel(RNNDolomitePreTrainedModel, GPTDolomiteModel):
 
     def forward(
         self,
-        input_ids: torch.Tensor = None,
-        past_key_values: Cache = None,
-        attention_mask: torch.Tensor = None,
-        token_type_ids: torch.Tensor = None,
-        position_ids: torch.Tensor = None,
-        inputs_embeds: torch.Tensor = None,
-        use_cache: bool = None,
-        output_hidden_states: bool = None,
-        return_dict: bool = None,
-        cu_seqlens: torch.Tensor = None,
-        max_seqlen: torch.Tensor = None,
-    ) -> Union[Tuple, BaseModelOutputWithPast]:
+        input_ids: torch.Tensor | None = None,
+        past_key_values: Cache | None = None,
+        attention_mask: torch.Tensor | None = None,
+        token_type_ids: torch.Tensor | None = None,
+        position_ids: torch.Tensor | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        use_cache: bool | None = None,
+        output_hidden_states: bool | None = None,
+        return_dict: bool | None = None,
+        cu_seqlens: torch.Tensor | None = None,
+        max_seqlen: torch.Tensor | None = None,
+    ) -> tuple | BaseModelOutputWithPast:
         (
             output_hidden_states,
             use_cache,
             return_dict,
-            input_shape,
             hidden_states,
             attention_mask,
             position_ids,
@@ -132,8 +122,6 @@ class RNNDolomiteModel(RNNDolomitePreTrainedModel, GPTDolomiteModel):
             max_seqlen=max_seqlen,
         )
 
-        output_shape = input_shape + (hidden_states.size(-1),)
-
         past_key_values = FLACache() if use_cache and past_key_values is None else past_key_values
         all_hidden_states = () if output_hidden_states else None
         for block in self.h:
@@ -151,7 +139,6 @@ class RNNDolomiteModel(RNNDolomitePreTrainedModel, GPTDolomiteModel):
 
         hidden_states = self.ln_f(hidden_states)
 
-        hidden_states = hidden_states.view(output_shape)
         # Add last hidden state
         if output_hidden_states:
             all_hidden_states += (hidden_states,)
