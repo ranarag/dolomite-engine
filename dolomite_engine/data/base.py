@@ -188,7 +188,6 @@ class BaseDataset(torch.utils.data.Dataset):
             )
 
             labels = input_ids.clone()
-
             if self.loss_mask in {LossMask.output, LossMask.output_prompted}:
                 for message_idx, message in enumerate(conversation):
                     if message["role"] != "assistant" and message["role"] != "assistant_tool_call":
@@ -230,6 +229,30 @@ class BaseDataset(torch.utils.data.Dataset):
                             ).shape[1]
 
                         labels[:, message_start_idx:message_end_idx] = -100
+            elif self.loss_mask == LossMask.last_turn_loss:                
+                last_id = len(conversation) - 1 #last message id
+                for message_idx in range(last_id, -1, -1):
+                    if conversation[message_idx]['role'] == 'assistant':
+                        message_end_idx = self.tokenizer.apply_chat_template(
+                            conversation[:message_idx], 
+                            tokenize=True, 
+                            add_generation_prompt=True,
+                            return_tensors="pt",
+                            training=True,
+                            use_system=False,
+                        ).shape[1]
+                        labels[:, 0:message_end_idx] = -100
+                        if message_idx < last_id: # for cases where the user is last.
+                            message_start_idx = self.tokenizer.apply_chat_template(
+                                conversation[:message_idx + 1], 
+                                tokenize=True, 
+                                add_generation_prompt=False,
+                                return_tensors="pt",
+                                training=True,
+                                use_system=False,
+                            ).shape[1]
+                            labels[:, message_start_idx:] = -100
+                        break
         if self.max_total_tokens:
             return {
                 "input_ids": input_ids.flatten()[:self.max_total_tokens],

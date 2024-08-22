@@ -81,6 +81,7 @@ class LossMask(str, Enum):
     output_prompted = "output_prompted"
     no_mask = "no_mask"
     no_mask_prompted = "no_mask_prompted"
+    last_turn_loss = "last_turn_loss"
 
 
 class ExperimentsTrackerName(str, Enum):
